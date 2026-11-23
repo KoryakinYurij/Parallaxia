@@ -1,0 +1,8 @@
+{
+  "name": "Parallaxia — Студия 2.5D-анимации",
+  "description": "Профессиональная студия 2.5D-анимации изображений с картами глубины, разделением на LDI-слои, заполнением скрытых зон фона (inpainting) и кинематографическим параллаксом.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
