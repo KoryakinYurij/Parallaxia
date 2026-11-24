@@ -2,10 +2,12 @@ import React, { useRef } from 'react';
 import {
   ChevronDown,
   ChevronUp,
+  Code2,
+  ImagePlus,
+  Layers,
   Pause,
   Play,
   RotateCcw,
-  Sparkles,
   Upload,
 } from 'lucide-react';
 import type { ComputedLdiAssets } from '../engine/imageProcessor';
@@ -27,13 +29,16 @@ interface BottomDockProps {
   cinematographyNote: string;
   ldiAssets: ComputedLdiAssets | null;
   collapsed: boolean;
-  aiAnalyzing: boolean;
-  aiError: string | null;
+  hasExternalDepth: boolean;
+  hasCleanPlate: boolean;
   onToggleCollapse: () => void;
   onUpdateState: (patch: Partial<StudioState>) => void;
   onSelectScene: (sceneId: string) => void;
   onUploadImage: (file: File) => void;
-  onAnalyzeWithAi: () => void;
+  onUploadDepthMap: (file: File) => void;
+  onUploadCleanPlate: (file: File) => void;
+  onClearCleanPlate: () => void;
+  onOpenRecipe: () => void;
   onResetDepth: () => void;
   onRecomputeLdi: () => void;
 }
@@ -55,8 +60,8 @@ const ATMOSPHERE_OPTIONS: ReadonlyArray<{ id: AtmosphereMode; label: string }> =
 ];
 
 const PIPELINE_OPTIONS: ReadonlyArray<{ id: RenderPipelineMode; label: string }> = [
+  { id: 'pom', label: 'Гибрид 2.5D (POM + Inpaint)' },
   { id: 'ldi', label: 'LDI Слои (3D)' },
-  { id: 'pom', label: 'POM Шейдер' },
   { id: 'exploded', label: '3D Разбор слоёв' },
 ];
 
@@ -129,17 +134,22 @@ export function BottomDock({
   cinematographyNote,
   ldiAssets,
   collapsed,
-  aiAnalyzing,
-  aiError,
+  hasExternalDepth,
+  hasCleanPlate,
   onToggleCollapse,
   onUpdateState,
   onSelectScene,
   onUploadImage,
-  onAnalyzeWithAi,
+  onUploadDepthMap,
+  onUploadCleanPlate,
+  onClearCleanPlate,
+  onOpenRecipe,
   onResetDepth,
   onRecomputeLdi,
 }: BottomDockProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const depthInputRef = useRef<HTMLInputElement | null>(null);
+  const cleanPlateInputRef = useRef<HTMLInputElement | null>(null);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -176,9 +186,9 @@ export function BottomDock({
         {/* SCENE & CAMERA TAB */}
         {dockTab === 'scene' && (
           <div className="flex flex-col gap-2.5">
-            {/* Row 1: Scene Selector + Upload + AI Analysis (Single Row on Desktop) */}
+            {/* Row 1: Auto-Discovered Scene Selector + Upload + JSON Recipe (Single Row on Desktop) */}
             <div className="flex flex-wrap lg:flex-nowrap items-center justify-between gap-2.5 border-b border-white/[0.07] pb-2.5">
-              <div className="flex items-center gap-2 overflow-x-auto">
+              <div className="flex min-w-0 items-center gap-2 overflow-x-auto">
                 {scenes.map((sc) => {
                   const selected = sc.id === state.sceneId;
                   return (
@@ -225,28 +235,18 @@ export function BottomDock({
                 </button>
                 <button
                   type="button"
-                  onClick={onAnalyzeWithAi}
-                  disabled={aiAnalyzing}
-                  className="flex items-center gap-1.5 rounded-md border border-[#E59838]/40 bg-[#251E15] px-3 py-1.5 text-xs font-medium text-[#F4B867] hover:bg-[#31271A] disabled:opacity-50 transition-colors cursor-pointer whitespace-nowrap"
+                  onClick={onOpenRecipe}
+                  className="flex items-center gap-1.5 rounded-md border border-[#E59838]/40 bg-[#251E15] px-3 py-1.5 text-xs font-medium text-[#F4B867] hover:bg-[#31271A] transition-colors cursor-pointer whitespace-nowrap"
                 >
-                  <Sparkles className="h-3.5 w-3.5" />
-                  <span>{aiAnalyzing ? 'Анализ...' : 'AI-глубина'}</span>
+                  <Code2 className="h-3.5 w-3.5" />
+                  <span>Рецепт JSON</span>
                 </button>
               </div>
             </div>
 
-            {aiError && (
-              <div
-                role="alert"
-                className="rounded-md border border-amber-500/30 bg-amber-950/40 px-3 py-2 text-xs text-amber-200"
-              >
-                {aiError}
-              </div>
-            )}
-
             {/* Row 2: Camera Motion + Play/Pause + Atmosphere */}
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="flex min-w-0 max-w-full items-center gap-2">
                 <button
                   type="button"
                   onClick={() => onUpdateState({ isPlaying: !state.isPlaying })}
@@ -259,7 +259,7 @@ export function BottomDock({
                 <div
                   role="group"
                   aria-label="Траектория камеры"
-                  className="flex items-center gap-1 rounded-lg bg-[#0D1016] p-1 border border-white/[0.06] overflow-x-auto"
+                  className="flex min-w-0 items-center gap-1 rounded-lg bg-[#0D1016] p-1 border border-white/[0.06] overflow-x-auto"
                 >
                   {MOTION_OPTIONS.map((m) => (
                     <button
@@ -355,10 +355,12 @@ export function BottomDock({
                 <span>{cinematographyNote}</span>
               </p>
               <span className="font-mono tabular-nums whitespace-nowrap">
-                {state.pipelineMode === 'ldi'
-                  ? 'Режим: LDI 3 слоя'
-                  : state.pipelineMode === 'pom'
-                    ? 'Режим: POM Raymarch'
+                {state.pipelineMode === 'pom'
+                  ? hasCleanPlate
+                    ? 'Режим: Гибрид POM + Clean Plate'
+                    : 'Режим: Гибрид POM + Inpaint'
+                  : state.pipelineMode === 'ldi'
+                    ? 'Режим: LDI 3 слоя'
                     : 'Режим: 3D Разбор'}
               </span>
             </div>
@@ -508,27 +510,64 @@ export function BottomDock({
                       <div className="h-full w-full bg-[#161A22]" />
                     )}
                   </div>
-                  <span className="text-[11px] text-[#F4B867] truncate">Заполненный фон</span>
+                  <span className="text-[11px] text-[#F4B867] truncate">
+                    {ldiAssets?.usingCleanPlate ? 'Clean Plate (HD)' : 'Заполненный фон'}
+                  </span>
                 </div>
               </div>
             </div>
 
-            {/* Unboxed quantitative summary line */}
+            {/* Unboxed quantitative summary + Clean Plate override */}
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[#8F98A8] pt-1 border-t border-white/[0.06]">
               <div className="flex items-center gap-2 font-mono tabular-nums">
                 <span>Зона дисокклюзии: {ldiAssets ? `${ldiAssets.holeCoveragePercent}%` : '—'}</span>
                 <span aria-hidden="true">·</span>
-                <span>Восстановлено пикселей: {ldiAssets ? ldiAssets.filledPixels.toLocaleString('ru-RU') : '—'}</span>
-                <span aria-hidden="true">·</span>
-                <span>Проходов: {ldiAssets ? ldiAssets.iterations : 0}</span>
+                <span>
+                  {ldiAssets?.usingCleanPlate
+                    ? 'Источник: HD Clean Plate'
+                    : `Восстановлено пикселей: ${ldiAssets ? ldiAssets.filledPixels.toLocaleString('ru-RU') : '—'}`}
+                </span>
               </div>
-              <button
-                type="button"
-                onClick={onRecomputeLdi}
-                className="text-xs font-medium text-[#E59838] hover:text-[#F4B867] transition-colors cursor-pointer whitespace-nowrap"
-              >
-                Пересчитать слои и Inpaint
-              </button>
+              <div className="flex items-center gap-3">
+                <input
+                  ref={cleanPlateInputRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp"
+                  className="hidden"
+                  aria-label="Загрузить чистый фон Clean Plate"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      onUploadCleanPlate(file);
+                      e.target.value = '';
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => cleanPlateInputRef.current?.click()}
+                  className="flex items-center gap-1.5 text-xs font-medium text-[#DCE2EC] hover:text-white transition-colors cursor-pointer whitespace-nowrap"
+                >
+                  <Layers className="h-3.5 w-3.5 text-[#E59838]" />
+                  <span>{hasCleanPlate ? 'Заменить Clean Plate' : 'Загрузить чистый фон'}</span>
+                </button>
+                {hasCleanPlate && (
+                  <button
+                    type="button"
+                    onClick={onClearCleanPlate}
+                    className="text-xs text-[#9AA4B4] hover:text-white transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    Сбросить фон
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={onRecomputeLdi}
+                  className="text-xs font-medium text-[#E59838] hover:text-[#F4B867] transition-colors cursor-pointer whitespace-nowrap"
+                >
+                  Пересчитать
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -619,19 +658,41 @@ export function BottomDock({
               />
 
               <div className="flex items-center justify-end gap-2">
+                <input
+                  ref={depthInputRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp"
+                  className="hidden"
+                  aria-label="Загрузить карту глубины PNG"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      onUploadDepthMap(file);
+                      e.target.value = '';
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => depthInputRef.current?.click()}
+                  className="flex items-center gap-1.5 rounded-md border border-[#E59838]/40 bg-[#251E15] px-2.5 py-2 text-xs font-medium text-[#F4B867] hover:bg-[#31271A] transition-colors cursor-pointer whitespace-nowrap"
+                >
+                  <ImagePlus className="h-3.5 w-3.5" />
+                  <span>{hasExternalDepth ? 'Сменить PNG' : 'Карта PNG'}</span>
+                </button>
                 <button
                   type="button"
                   onClick={onResetDepth}
-                  className="flex items-center gap-1.5 rounded-md border border-white/[0.12] bg-[#1A1F2B] px-3 py-2 text-xs font-medium text-[#E4E8F0] hover:bg-[#232A39] transition-colors cursor-pointer whitespace-nowrap"
+                  className="flex items-center gap-1.5 rounded-md border border-white/[0.12] bg-[#1A1F2B] px-2.5 py-2 text-xs font-medium text-[#E4E8F0] hover:bg-[#232A39] transition-colors cursor-pointer whitespace-nowrap"
                 >
                   <RotateCcw className="h-3.5 w-3.5" />
-                  <span>Сбросить карту</span>
+                  <span>Сбросить</span>
                 </button>
               </div>
             </div>
 
             <p className="text-xs text-[#8F98A8] pt-1 border-t border-white/[0.06]">
-              Рисуйте прямо на изображении выше: белый приближает объект к камере (передний слой), чёрный уводит на фон. После отпускания кисти LDI-слои и Inpaint обновляются автоматически.
+              Рисуйте прямо на кадре (белый — ближе, чёрный — дальше) или импортируйте готовую Ч/Б карту PNG (Depth Anything / Blender) — RGB Guided Filter автоматически привяжет её к контурам.
             </p>
           </div>
         )}

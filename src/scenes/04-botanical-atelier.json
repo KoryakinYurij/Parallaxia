@@ -1,0 +1,183 @@
+{
+  "id": "botanical-atelier",
+  "order": 4,
+  "title": "Ателье у окна",
+  "category": "Интерьер · Предметка",
+  "imageUrl": "/src/assets/images/scene_botanical_atelier_1795441167857.jpg",
+  "aspectRatio": 1.7777777778,
+  "defaultMotion": "truck",
+  "defaultAtmosphere": "dust",
+  "defaultConvergence": 0.56,
+  "defaultForegroundCut": 0.74,
+  "defaultMidgroundCut": 0.36,
+  "cinematographyNote": "Плавная геометрия комнаты: дубовый верстак и ваза с оливой на переднем плане, мольберт и пол уходят вглубь, а пейзаж за арочным окном остаётся на дальнем плане.",
+  "blueprint": {
+    "horizonY": 0.46,
+    "groundSlope": 0.38,
+    "edgeWeight": 0.06,
+    "horizontalTilt": 0.2,
+    "regions": [
+      {
+        "label": "Дальний пейзаж за большим окном",
+        "layer": "background",
+        "shape": "polygon",
+        "cx": 0.86,
+        "cy": 0.29,
+        "rx": 0.15,
+        "ry": 0.3,
+        "points": [
+          [0.73, 0.02],
+          [0.98, 0.02],
+          [0.98, 0.58],
+          [0.72, 0.58]
+        ],
+        "depth": 0.07,
+        "depthBottom": 0.16,
+        "softness": 0.035,
+        "lumaMin": 0.32
+      },
+      {
+        "label": "Дальний свет в узкой арке окна",
+        "layer": "background",
+        "shape": "polygon",
+        "cx": 0.61,
+        "cy": 0.25,
+        "rx": 0.05,
+        "ry": 0.26,
+        "points": [
+          [0.56, 0.01],
+          [0.66, 0.01],
+          [0.66, 0.54],
+          [0.56, 0.54]
+        ],
+        "depth": 0.12,
+        "depthBottom": 0.22,
+        "softness": 0.03,
+        "lumaMin": 0.45
+      },
+      {
+        "label": "Деревянный пол (плавная перспектива)",
+        "layer": "midground",
+        "shape": "polygon",
+        "cx": 0.74,
+        "cy": 0.84,
+        "rx": 0.3,
+        "ry": 0.18,
+        "points": [
+          [0.48, 0.64],
+          [1.02, 0.64],
+          [1.02, 1.02],
+          [0.44, 1.02]
+        ],
+        "depth": 0.36,
+        "depthBottom": 0.82,
+        "softness": 0.06
+      },
+      {
+        "label": "Шторы и дальний стол",
+        "layer": "midground",
+        "shape": "rect",
+        "cx": 0.45,
+        "cy": 0.38,
+        "rx": 0.18,
+        "ry": 0.34,
+        "depth": 0.44,
+        "depthBottom": 0.52,
+        "softness": 0.08
+      },
+      {
+        "label": "Мольберт и холст",
+        "layer": "midground",
+        "shape": "polygon",
+        "cx": 0.66,
+        "cy": 0.52,
+        "rx": 0.12,
+        "ry": 0.46,
+        "points": [
+          [0.57, 0.03],
+          [0.74, 0.03],
+          [0.76, 0.96],
+          [0.56, 0.96]
+        ],
+        "depth": 0.6,
+        "depthBottom": 0.68,
+        "softness": 0.02,
+        "lumaMax": 0.38
+      },
+      {
+        "label": "Табурет с тканью",
+        "layer": "midground",
+        "shape": "polygon",
+        "cx": 0.78,
+        "cy": 0.8,
+        "rx": 0.08,
+        "ry": 0.18,
+        "points": [
+          [0.71, 0.65],
+          [0.85, 0.65],
+          [0.86, 0.98],
+          [0.71, 0.98]
+        ],
+        "depth": 0.64,
+        "depthBottom": 0.72,
+        "softness": 0.03
+      },
+      {
+        "label": "Дубовый верстак переднего плана",
+        "layer": "foreground",
+        "shape": "polygon",
+        "cx": 0.28,
+        "cy": 0.86,
+        "rx": 0.32,
+        "ry": 0.18,
+        "points": [
+          [-0.02, 0.73],
+          [0.38, 0.69],
+          [0.58, 0.71],
+          [0.57, 0.84],
+          [0.45, 1.02],
+          [-0.02, 1.02]
+        ],
+        "depth": 0.84,
+        "depthBottom": 0.97,
+        "softness": 0.025
+      },
+      {
+        "label": "Керамическая ваза",
+        "layer": "foreground",
+        "shape": "ellipse",
+        "cx": 0.25,
+        "cy": 0.72,
+        "rx": 0.072,
+        "ry": 0.165,
+        "depth": 0.91,
+        "softness": 0.02
+      },
+      {
+        "label": "Ветви оливы в вазе",
+        "layer": "foreground",
+        "shape": "ellipse",
+        "cx": 0.24,
+        "cy": 0.37,
+        "rx": 0.21,
+        "ry": 0.24,
+        "depth": 0.9,
+        "softness": 0.03,
+        "lumaMax": 0.5,
+        "greenMin": 0.012
+      },
+      {
+        "label": "Стакан с кистями",
+        "layer": "foreground",
+        "shape": "ellipse",
+        "cx": 0.4,
+        "cy": 0.67,
+        "rx": 0.038,
+        "ry": 0.11,
+        "depth": 0.83,
+        "softness": 0.02,
+        "lumaMax": 0.52
+      }
+    ]
+  }
+}

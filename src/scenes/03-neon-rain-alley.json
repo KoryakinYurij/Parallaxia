@@ -1,0 +1,99 @@
+{
+  "id": "neon-rain-alley",
+  "order": 3,
+  "title": "Дождливый переулок",
+  "category": "Ночной город · Перспектива",
+  "imageUrl": "/src/assets/images/scene_neon_rain_alley_1795441169243.jpg",
+  "aspectRatio": 1.7777777778,
+  "defaultMotion": "ken-burns",
+  "defaultAtmosphere": "rain",
+  "defaultConvergence": 0.48,
+  "defaultForegroundCut": 0.68,
+  "defaultMidgroundCut": 0.32,
+  "cinematographyNote": "Глубокая центральная перспектива переулка с плавным уходом мокрого асфальта и витрин в точку схода раскрывается при медленном наезде.",
+  "blueprint": {
+    "horizonY": 0.48,
+    "groundSlope": 0.46,
+    "edgeWeight": 0.07,
+    "regions": [
+      {
+        "label": "Туманные небоскрёбы в точке схода",
+        "layer": "background",
+        "shape": "rect",
+        "cx": 0.53,
+        "cy": 0.28,
+        "rx": 0.18,
+        "ry": 0.34,
+        "depth": 0.07,
+        "depthBottom": 0.16,
+        "softness": 0.1
+      },
+      {
+        "label": "Мокрый асфальт (непрерывная перспектива)",
+        "layer": "midground",
+        "shape": "polygon",
+        "cx": 0.58,
+        "cy": 0.82,
+        "rx": 0.38,
+        "ry": 0.24,
+        "points": [
+          [0.44, 0.6],
+          [0.72, 0.6],
+          [1.02, 1.02],
+          [0.34, 1.02]
+        ],
+        "depth": 0.22,
+        "depthBottom": 0.86,
+        "softness": 0.08
+      },
+      {
+        "label": "Витрины справа",
+        "layer": "midground",
+        "shape": "polygon",
+        "cx": 0.86,
+        "cy": 0.42,
+        "rx": 0.18,
+        "ry": 0.46,
+        "points": [
+          [0.72, 0.0],
+          [1.02, 0.0],
+          [1.02, 0.8],
+          [0.72, 0.68]
+        ],
+        "depth": 0.46,
+        "depthBottom": 0.68,
+        "softness": 0.08
+      },
+      {
+        "label": "Кирпичная стена и велосипед слева",
+        "layer": "foreground",
+        "shape": "polygon",
+        "cx": 0.18,
+        "cy": 0.52,
+        "rx": 0.22,
+        "ry": 0.52,
+        "points": [
+          [-0.02, -0.02],
+          [0.32, -0.02],
+          [0.38, 0.52],
+          [0.41, 0.98],
+          [-0.02, 1.02]
+        ],
+        "depth": 0.86,
+        "depthBottom": 0.95,
+        "softness": 0.04
+      },
+      {
+        "label": "Бумажный фонарь",
+        "layer": "foreground",
+        "shape": "ellipse",
+        "cx": 0.27,
+        "cy": 0.23,
+        "rx": 0.055,
+        "ry": 0.15,
+        "depth": 0.95,
+        "softness": 0.025
+      }
+    ]
+  }
+}

@@ -4,6 +4,7 @@ import {
   depthBufferToGrayscaleRgba,
   depthBufferToHeatmapRgba,
   disocclusionMaskToRgba,
+  guidedFilterDepth,
   inpaintBackgroundPlate,
   synthesizeDepthBuffer,
 } from './depthPipeline';
@@ -30,6 +31,7 @@ export interface ComputedLdiAssets {
   holeCoveragePercent: number;
   filledPixels: number;
   iterations: number;
+  usingCleanPlate: boolean;
 }
 
 const MAX_DISPLAY_WIDTH = 1280;
@@ -83,6 +85,61 @@ export async function prepareImageAssets(imageUrl: string): Promise<LoadedImageA
   };
 }
 
+/**
+ * Loads an external grayscale depth map PNG/JPG (bright = near, dark = far),
+ * normalizes to [0..1] at processing resolution, and optionally refines edges
+ * with the 3-channel RGB Guided Image Filter against the original photograph.
+ */
+export async function loadExternalDepthBuffer(params: {
+  depthMapUrl: string;
+  assets: LoadedImageAssets;
+  applyGuidedSnap?: boolean;
+  invert?: boolean;
+}): Promise<Float32Array> {
+  const { depthMapUrl, assets, applyGuidedSnap = true, invert = false } = params;
+  const img = await loadImageElement(depthMapUrl);
+  const canvas = document.createElement('canvas');
+  canvas.width = assets.procWidth;
+  canvas.height = assets.procHeight;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('2D Canvas context unavailable');
+  ctx.drawImage(img, 0, 0, assets.procWidth, assets.procHeight);
+  const data = ctx.getImageData(0, 0, assets.procWidth, assets.procHeight).data;
+
+  const total = assets.procWidth * assets.procHeight;
+  const raw = new Float32Array(total);
+  for (let i = 0; i < total; i++) {
+    const idx = i * 4;
+    const lum = (0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2]) / 255;
+    raw[i] = invert ? 1 - lum : lum;
+  }
+
+  return applyGuidedSnap
+    ? guidedFilterDepth(raw, assets.procRgba, assets.procWidth, assets.procHeight, 5, 0.003)
+    : raw;
+}
+
+/**
+ * Loads an external HD generative clean-plate background (foreground removed)
+ * matching the display canvas dimensions.
+ */
+export async function loadCleanPlateCanvas(
+  cleanPlateUrl: string,
+  displayWidth: number,
+  displayHeight: number,
+): Promise<HTMLCanvasElement> {
+  const img = await loadImageElement(cleanPlateUrl);
+  const canvas = document.createElement('canvas');
+  canvas.width = displayWidth;
+  canvas.height = displayHeight;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('2D Canvas context unavailable');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, 0, 0, displayWidth, displayHeight);
+  return canvas;
+}
+
 export function generateInitialDepth(
   assets: LoadedImageAssets,
   blueprint?: SceneDepthBlueprint | null,
@@ -126,7 +183,6 @@ function buildHighResMaskedLayer(
 
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
-  // Draw upscaled alpha matte first, then source-in full-res RGB image for razor-sharp textures
   ctx.drawImage(maskCanvas, 0, 0, out.width, out.height);
   ctx.globalCompositeOperation = 'source-in';
   ctx.drawImage(sourceCanvas, 0, 0, out.width, out.height);
@@ -136,7 +192,8 @@ function buildHighResMaskedLayer(
 
 /**
  * Composites a crisp HD background plate: full-res original background pixels
- * outside the disocclusion zone, seamlessly filled with the inpainted buffer inside the hole.
+ * outside the disocclusion zone, seamlessly filled inside the hole with either
+ * a supplied HD generative Clean Plate or the multi-scale inpainted buffer.
  */
 function buildHighResBackgroundPlate(
   sourceCanvas: HTMLCanvasElement,
@@ -145,6 +202,7 @@ function buildHighResBackgroundPlate(
   procWidth: number,
   procHeight: number,
   algorithm: InpaintAlgorithm,
+  cleanPlateCanvas?: HTMLCanvasElement | null,
 ): HTMLCanvasElement {
   const out = document.createElement('canvas');
   out.width = sourceCanvas.width;
@@ -155,7 +213,6 @@ function buildHighResBackgroundPlate(
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
 
-  // Build non-hole alpha mask so original HD pixels stay crisp outside the disocclusion zone
   const validMaskRgba = new Uint8ClampedArray(procWidth * procHeight * 4);
   for (let i = 0; i < procWidth * procHeight; i++) {
     const idx = i * 4;
@@ -166,15 +223,31 @@ function buildHighResBackgroundPlate(
   }
 
   if (algorithm !== 'none') {
-    // Base layer: smoothly upscaled inpainted plate covering the holes
-    const inpaintedCanvas = rgbaToCanvas(inpaintedLowResRgba, procWidth, procHeight);
-    ctx.drawImage(inpaintedCanvas, 0, 0, out.width, out.height);
+    if (cleanPlateCanvas) {
+      // Studio-grade generative Clean Plate fills disocclusion holes with crisp HD detail!
+      ctx.drawImage(cleanPlateCanvas, 0, 0, out.width, out.height);
+    } else {
+      const inpaintedCanvas = rgbaToCanvas(inpaintedLowResRgba, procWidth, procHeight);
+      ctx.drawImage(inpaintedCanvas, 0, 0, out.width, out.height);
+    }
   }
 
-  // Overlay crisp HD original pixels strictly in non-hole regions
   const hdValid = buildHighResMaskedLayer(sourceCanvas, validMaskRgba, procWidth, procHeight);
   ctx.drawImage(hdValid, 0, 0, out.width, out.height);
   return out;
+}
+
+function makeThumbnailDataUrl(canvas: HTMLCanvasElement, maxW = 320): string {
+  const scale = Math.min(1, maxW / canvas.width);
+  const w = Math.max(1, Math.round(canvas.width * scale));
+  const h = Math.max(1, Math.round(canvas.height * scale));
+  const tmp = document.createElement('canvas');
+  tmp.width = w;
+  tmp.height = h;
+  const ctx = tmp.getContext('2d');
+  if (!ctx) return '';
+  ctx.drawImage(canvas, 0, 0, w, h);
+  return tmp.toDataURL('image/png');
 }
 
 export function computeLdiAndInpaintAssets(params: {
@@ -185,6 +258,7 @@ export function computeLdiAndInpaintAssets(params: {
   midgroundCut: number;
   edgeFeather: number;
   inpaintMode: InpaintAlgorithm;
+  cleanPlateCanvas?: HTMLCanvasElement | null;
 }): ComputedLdiAssets {
   const {
     assets,
@@ -194,6 +268,7 @@ export function computeLdiAndInpaintAssets(params: {
     midgroundCut,
     edgeFeather,
     inpaintMode,
+    cleanPlateCanvas,
   } = params;
 
   const adjustedDepth = applyDepthContrast(rawDepth, depthContrast);
@@ -209,14 +284,22 @@ export function computeLdiAndInpaintAssets(params: {
     dilationPx: 3,
   });
 
-  const inpaint = inpaintBackgroundPlate({
-    backgroundRgba: ldi.backgroundRgba,
-    disocclusionMask: ldi.disocclusionMask,
-    width: assets.procWidth,
-    height: assets.procHeight,
-    algorithm: inpaintMode,
-    maxIterations: 96,
-  });
+  const usingCleanPlate = Boolean(cleanPlateCanvas) && inpaintMode !== 'none';
+
+  const inpaint = usingCleanPlate
+    ? {
+        inpaintedRgba: ldi.backgroundRgba,
+        filledPixels: ldi.holePixelCount,
+        iterations: 1,
+      }
+    : inpaintBackgroundPlate({
+        backgroundRgba: ldi.backgroundRgba,
+        disocclusionMask: ldi.disocclusionMask,
+        width: assets.procWidth,
+        height: assets.procHeight,
+        algorithm: inpaintMode,
+        maxIterations: 96,
+      });
 
   const foregroundCanvas = buildHighResMaskedLayer(
     assets.sourceCanvas,
@@ -237,19 +320,21 @@ export function computeLdiAndInpaintAssets(params: {
     assets.procWidth,
     assets.procHeight,
     inpaintMode,
+    cleanPlateCanvas,
   );
 
   const depthGray = depthBufferToGrayscaleRgba(adjustedDepth);
   const depthCanvas = rgbaToCanvas(depthGray, assets.procWidth, assets.procHeight);
 
-  // Compact preview thumbnails for the LDI & Inpainting Inspector
   const fgThumbCanvas = rgbaToCanvas(ldi.foregroundRgba, assets.procWidth, assets.procHeight);
   const holeThumbCanvas = rgbaToCanvas(
     disocclusionMaskToRgba(ldi.disocclusionMask),
     assets.procWidth,
     assets.procHeight,
   );
-  const inpaintThumbCanvas = rgbaToCanvas(inpaint.inpaintedRgba, assets.procWidth, assets.procHeight);
+  const inpaintedPreviewUrl = usingCleanPlate
+    ? makeThumbnailDataUrl(backgroundCanvas, assets.procWidth)
+    : rgbaToCanvas(inpaint.inpaintedRgba, assets.procWidth, assets.procHeight).toDataURL('image/png');
 
   return {
     backgroundCanvas,
@@ -258,10 +343,11 @@ export function computeLdiAndInpaintAssets(params: {
     depthCanvas,
     foregroundPreviewUrl: fgThumbCanvas.toDataURL('image/png'),
     holeMaskPreviewUrl: holeThumbCanvas.toDataURL('image/png'),
-    inpaintedPreviewUrl: inpaintThumbCanvas.toDataURL('image/png'),
+    inpaintedPreviewUrl,
     holeCoveragePercent: Math.round(ldi.holeCoverageRatio * 1000) / 10,
     filledPixels: inpaint.filledPixels,
     iterations: inpaint.iterations,
+    usingCleanPlate,
   };
 }
 
@@ -273,17 +359,4 @@ export function exportDepthMapDataUrl(
 ): string {
   const rgba = heatmap ? depthBufferToHeatmapRgba(depth) : depthBufferToGrayscaleRgba(depth);
   return rgbaToCanvas(rgba, width, height).toDataURL('image/png');
-}
-
-export function resizeImageToBase64(sourceCanvas: HTMLCanvasElement, maxW = 768): string {
-  const scale = Math.min(1, maxW / sourceCanvas.width);
-  const w = Math.max(1, Math.round(sourceCanvas.width * scale));
-  const h = Math.max(1, Math.round(sourceCanvas.height * scale));
-  const tmp = document.createElement('canvas');
-  tmp.width = w;
-  tmp.height = h;
-  const ctx = tmp.getContext('2d');
-  if (!ctx) return '';
-  ctx.drawImage(sourceCanvas, 0, 0, w, h);
-  return tmp.toDataURL('image/jpeg', 0.82);
 }

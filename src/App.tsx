@@ -2,24 +2,31 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BottomDock } from './components/BottomDock';
 import { ExportModal } from './components/ExportModal';
 import { ParallaxViewport, type ParallaxViewportHandle } from './components/ParallaxViewport';
+import { RecipeModal } from './components/RecipeModal';
 import { TechniquesDrawer } from './components/TechniquesDrawer';
 import { TopBar } from './components/TopBar';
-import { applyDepthBrushStroke, applyDepthContrast } from './engine/depthPipeline';
+import {
+  applyDepthBrushStroke,
+  applyDepthContrast,
+  parseAndValidateBlueprint,
+  parseAndValidateSceneManifest,
+} from './engine/depthPipeline';
 import {
   computeLdiAndInpaintAssets,
   exportDepthMapDataUrl,
   generateInitialDepth,
+  loadCleanPlateCanvas,
+  loadExternalDepthBuffer,
   prepareImageAssets,
-  resizeImageToBase64,
   type ComputedLdiAssets,
   type LoadedImageAssets,
 } from './engine/imageProcessor';
 import { STUDIO_SCENES } from './engine/presets';
 import type {
-  AiSceneAnalysis,
-  AtmosphereMode,
-  CameraMotionPreset,
+  DepthViewOverlay,
+  RenderPipelineMode,
   SceneDepthBlueprint,
+  StudioScenePreset,
   StudioState,
   WorkspaceTab,
 } from './engine/types';
@@ -33,16 +40,69 @@ function triggerDownloadDataUrl(dataUrl: string, filename: string) {
   a.remove();
 }
 
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') resolve(reader.result);
+      else reject(new Error('Не удалось прочитать файл'));
+    };
+    reader.onerror = () => reject(new Error('Ошибка чтения файла'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function parseInitialUrlOverrides(scenes: StudioScenePreset[]) {
+  if (typeof window === 'undefined') {
+    return {
+      scene: scenes[0],
+      tab: 'scene' as WorkspaceTab,
+      overlay: 'final' as DepthViewOverlay,
+      pipeline: 'pom' as RenderPipelineMode,
+      dockCollapsed: false,
+      paused: false,
+    };
+  }
+  const params = new URLSearchParams(window.location.search);
+  const sceneParam = params.get('scene');
+  const scene = scenes.find((s) => s.id === sceneParam) ?? scenes[0];
+
+  const tabParam = params.get('tab');
+  const tab: WorkspaceTab =
+    tabParam === 'layers' || tabParam === 'depth' || tabParam === 'scene' ? tabParam : 'scene';
+
+  const overlayParam = params.get('overlay');
+  const overlay: DepthViewOverlay =
+    overlayParam === 'heatmap' ||
+    overlayParam === 'grayscale' ||
+    overlayParam === 'split' ||
+    overlayParam === 'final'
+      ? overlayParam
+      : tab === 'depth'
+        ? 'heatmap'
+        : 'final';
+
+  const pipeParam = params.get('pipeline');
+  const pipeline: RenderPipelineMode =
+    pipeParam === 'ldi' || pipeParam === 'exploded' || pipeParam === 'pom' ? pipeParam : 'pom';
+
+  const dockCollapsed = params.get('dock') === '0';
+  const paused = params.get('paused') === '1';
+
+  return { scene, tab, overlay, pipeline, dockCollapsed, paused };
+}
+
 export default function App() {
-  const initialScene = STUDIO_SCENES[0];
+  const boot = useMemo(() => parseInitialUrlOverrides(STUDIO_SCENES), []);
+  const initialScene = boot.scene;
   const viewportRef = useRef<ParallaxViewportHandle | null>(null);
 
   const [state, setState] = useState<StudioState>({
-    activeTab: 'scene',
+    activeTab: boot.tab,
     sceneId: initialScene.id,
-    pipelineMode: 'ldi',
+    pipelineMode: boot.pipeline,
     motionPreset: initialScene.defaultMotion,
-    isPlaying: true,
+    isPlaying: !boot.paused,
     speed: 1.0,
     parallaxStrength: 0.65,
     convergence: initialScene.defaultConvergence,
@@ -55,25 +115,32 @@ export default function App() {
     layerSeparation: 0.6,
     edgeFeather: 0.06,
     inpaintMode: 'multipass',
-    depthOverlay: 'final',
+    depthOverlay: boot.overlay,
     brushTool: 'near',
     brushRadius: 0.09,
     brushStrength: 0.7,
     depthContrast: 1.0,
   });
 
-  const [dockCollapsed, setDockCollapsed] = useState(false);
+  const [dockCollapsed, setDockCollapsed] = useState(boot.dockCollapsed);
   const [techniquesOpen, setTechniquesOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [recipeOpen, setRecipeOpen] = useState(false);
   const [loadingScene, setLoadingScene] = useState(true);
   const [sceneError, setSceneError] = useState<string | null>(null);
-  const [aiAnalyzing, setAiAnalyzing] = useState(false);
-  const [aiError, setAiError] = useState<string | null>(null);
 
   const [customImageUrl, setCustomImageUrl] = useState<string | null>(null);
   const [customTitle, setCustomTitle] = useState<string | null>(null);
   const [customNote, setCustomNote] = useState<string | null>(null);
   const [customBlueprint, setCustomBlueprint] = useState<SceneDepthBlueprint | null>(null);
+
+  // External studio passes (can come from Scene Manifest JSON or direct user upload)
+  const [customDepthMapUrl, setCustomDepthMapUrl] = useState<string | null>(null);
+  const [invertExternalDepth, setInvertExternalDepth] = useState(false);
+  const [snapExternalDepth, setSnapExternalDepth] = useState(true);
+
+  const [customCleanPlateUrl, setCustomCleanPlateUrl] = useState<string | null>(null);
+  const [cleanPlateCanvas, setCleanPlateCanvas] = useState<HTMLCanvasElement | null>(null);
 
   const [imageAssets, setImageAssets] = useState<LoadedImageAssets | null>(null);
   const [ldiAssets, setLdiAssets] = useState<ComputedLdiAssets | null>(null);
@@ -91,17 +158,64 @@ export default function App() {
   const activeSceneTitle = customTitle ?? activePreset.title;
   const activeNote = customNote ?? activePreset.cinematographyNote;
   const activeBlueprint = customBlueprint ?? activePreset.blueprint;
+  const effectiveDepthMapUrl = customDepthMapUrl ?? activePreset.depthMapUrl ?? null;
+  const effectiveCleanPlateUrl = customCleanPlateUrl ?? activePreset.cleanPlateUrl ?? null;
 
-  // Load image and synthesize initial depth map whenever the active image or blueprint changes
+  // Build current live manifest snapshot for the Recipe JSON modal
+  const liveManifest = useMemo<StudioScenePreset>(
+    () => ({
+      id: activePreset.id,
+      ...(activePreset.order !== undefined ? { order: activePreset.order } : {}),
+      title: activeSceneTitle,
+      category: activePreset.category,
+      imageUrl: customImageUrl ? '(uploaded-data-url)' : activePreset.imageUrl,
+      ...(activePreset.depthMapUrl ? { depthMapUrl: activePreset.depthMapUrl } : {}),
+      ...(activePreset.cleanPlateUrl ? { cleanPlateUrl: activePreset.cleanPlateUrl } : {}),
+      aspectRatio: imageAssets?.aspectRatio ?? activePreset.aspectRatio,
+      defaultMotion: state.motionPreset,
+      defaultAtmosphere: state.atmosphere,
+      defaultConvergence: state.convergence,
+      defaultForegroundCut: state.foregroundCut,
+      defaultMidgroundCut: state.midgroundCut,
+      cinematographyNote: activeNote,
+      blueprint: activeBlueprint,
+    }),
+    [
+      activePreset,
+      activeSceneTitle,
+      customImageUrl,
+      imageAssets,
+      state.motionPreset,
+      state.atmosphere,
+      state.convergence,
+      state.foregroundCut,
+      state.midgroundCut,
+      activeNote,
+      activeBlueprint,
+    ],
+  );
+
+  // Load source image + depth buffer (external Depth PNG if present, otherwise blueprint synthesis + RGB Guided Filter)
   useEffect(() => {
     let cancelled = false;
     setLoadingScene(true);
     setSceneError(null);
 
     prepareImageAssets(activeImageUrl)
-      .then((assets) => {
+      .then(async (assets) => {
         if (cancelled) return;
-        const depth = generateInitialDepth(assets, activeBlueprint);
+        let depth: Float32Array;
+        if (effectiveDepthMapUrl) {
+          depth = await loadExternalDepthBuffer({
+            depthMapUrl: effectiveDepthMapUrl,
+            assets,
+            applyGuidedSnap: snapExternalDepth,
+            invert: invertExternalDepth,
+          });
+        } else {
+          depth = generateInitialDepth(assets, activeBlueprint);
+        }
+        if (cancelled) return;
         depthBufferRef.current = depth;
         setImageAssets(assets);
         setDepthRevision((r) => r + 1);
@@ -116,9 +230,43 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeImageUrl, activeBlueprint]);
+  }, [
+    activeImageUrl,
+    activeBlueprint,
+    effectiveDepthMapUrl,
+    snapExternalDepth,
+    invertExternalDepth,
+  ]);
 
-  // Recompute LDI 3-layer separation + disocclusion inpainting when depth or LDI settings change
+  // Load optional HD Clean Plate background whenever active cleanPlateUrl or display size changes
+  useEffect(() => {
+    if (!imageAssets || !effectiveCleanPlateUrl) {
+      setCleanPlateCanvas(null);
+      return;
+    }
+    let cancelled = false;
+    loadCleanPlateCanvas(
+      effectiveCleanPlateUrl,
+      imageAssets.displayWidth,
+      imageAssets.displayHeight,
+    )
+      .then((canvas) => {
+        if (!cancelled) setCleanPlateCanvas(canvas);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setCleanPlateCanvas(null);
+          setSceneError(
+            err instanceof Error ? err.message : 'Не удалось загрузить чистый фон (Clean Plate)',
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [imageAssets, effectiveCleanPlateUrl]);
+
+  // Recompute LDI 3-layer separation + disocclusion inpainting (or Clean Plate composite)
   useEffect(() => {
     if (!imageAssets || !depthBufferRef.current) return;
     const computed = computeLdiAndInpaintAssets({
@@ -129,6 +277,7 @@ export default function App() {
       midgroundCut: state.midgroundCut,
       edgeFeather: state.edgeFeather,
       inpaintMode: state.inpaintMode,
+      cleanPlateCanvas,
     });
     setLdiAssets(computed);
   }, [
@@ -139,9 +288,10 @@ export default function App() {
     state.midgroundCut,
     state.edgeFeather,
     state.inpaintMode,
+    cleanPlateCanvas,
   ]);
 
-  // Keyboard shortcuts: H toggles bottom dock, Space toggles play/pause
+  // Keyboard shortcuts: H toggles bottom dock, Space toggles play/pause, Escape closes modals
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
@@ -153,6 +303,7 @@ export default function App() {
       } else if (e.key === 'Escape') {
         setTechniquesOpen(false);
         setExportOpen(false);
+        setRecipeOpen(false);
       }
     };
     window.addEventListener('keydown', onKeyDown);
@@ -173,8 +324,12 @@ export default function App() {
     setState((prev) => ({
       ...prev,
       activeTab: tab,
-      depthOverlay: tab === 'depth' && prev.depthOverlay === 'final' ? 'heatmap' : tab === 'depth' ? prev.depthOverlay : 'final',
-      pipelineMode: tab === 'layers' && prev.pipelineMode === 'pom' ? 'ldi' : prev.pipelineMode,
+      depthOverlay:
+        tab === 'depth' && prev.depthOverlay === 'final'
+          ? 'heatmap'
+          : tab === 'depth'
+            ? prev.depthOverlay
+            : 'final',
     }));
   }, []);
 
@@ -185,7 +340,10 @@ export default function App() {
     setCustomTitle(null);
     setCustomNote(null);
     setCustomBlueprint(null);
-    setAiError(null);
+    setCustomDepthMapUrl(null);
+    setCustomCleanPlateUrl(null);
+    setInvertExternalDepth(false);
+    setSnapExternalDepth(true);
     setState((prev) => ({
       ...prev,
       sceneId: preset.id,
@@ -199,88 +357,88 @@ export default function App() {
   }, []);
 
   const handleUploadImage = useCallback((file: File) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result !== 'string') return;
-      setCustomImageUrl(reader.result);
-      setCustomTitle(file.name.replace(/\.[^.]+$/, '') || 'Пользовательское фото');
-      setCustomNote(
-        'Карта глубины построена локально по перспективе и контрасту. Нажмите «AI-разбор глубины» или доработайте карту кистью.',
-      );
-      setCustomBlueprint({
-        horizonY: 0.4,
-        groundSlope: 0.45,
-        edgeWeight: 0.22,
-        regions: [],
+    readFileAsDataUrl(file)
+      .then((dataUrl) => {
+        setCustomImageUrl(dataUrl);
+        setCustomTitle(file.name.replace(/\.[^.]+$/, '') || 'Пользовательское фото');
+        setCustomNote(
+          'Локальная перспектива + RGB Guided Filter. Загрузите внешнюю карту глубины PNG, чистый фон Clean Plate или настройте рецепт JSON.',
+        );
+        setCustomBlueprint({
+          horizonY: 0.42,
+          groundSlope: 0.42,
+          edgeWeight: 0.1,
+          regions: [],
+        });
+        setCustomDepthMapUrl(null);
+        setCustomCleanPlateUrl(null);
+      })
+      .catch((err) => {
+        setSceneError(err instanceof Error ? err.message : 'Ошибка загрузки файла');
       });
-      setAiError(null);
-    };
-    reader.readAsDataURL(file);
   }, []);
 
-  const handleAnalyzeWithAi = useCallback(async () => {
-    if (!imageAssets) return;
-    setAiAnalyzing(true);
-    setAiError(null);
-    try {
-      const base64 = resizeImageToBase64(imageAssets.sourceCanvas, 768);
-      const response = await fetch('/api/analyze-scene', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64: base64, mimeType: 'image/jpeg' }),
+  const handleUploadDepthMap = useCallback((file: File) => {
+    readFileAsDataUrl(file)
+      .then((dataUrl) => {
+        setCustomDepthMapUrl(dataUrl);
+      })
+      .catch((err) => {
+        setSceneError(err instanceof Error ? err.message : 'Ошибка чтения карты глубины');
       });
-      const payload = (await response.json()) as { analysis?: AiSceneAnalysis; error?: string };
-      if (!response.ok || !payload.analysis) {
-        throw new Error(payload.error || 'Не удалось получить анализ глубины от сервера.');
+  }, []);
+
+  const handleUploadCleanPlate = useCallback((file: File) => {
+    readFileAsDataUrl(file)
+      .then((dataUrl) => {
+        setCustomCleanPlateUrl(dataUrl);
+      })
+      .catch((err) => {
+        setSceneError(err instanceof Error ? err.message : 'Ошибка чтения чистого фона');
+      });
+  }, []);
+
+  const handleApplyRecipeJson = useCallback(
+    (rawJson: string): { ok: true } | { ok: false; error: string } => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(rawJson);
+      } catch (err) {
+        return {
+          ok: false,
+          error: `Синтаксическая ошибка JSON: ${err instanceof Error ? err.message : 'некорректный JSON'}`,
+        };
       }
 
-      const analysis = payload.analysis;
-      const validMotions: CameraMotionPreset[] = [
-        'orbit',
-        'dolly-zoom',
-        'truck',
-        'ken-burns',
-        'breathe',
-        'pointer',
-      ];
-      const validAtmos: AtmosphereMode[] = ['none', 'dust', 'mist', 'rain'];
+      // Accept either a full Scene Manifest or a standalone SceneDepthBlueprint
+      if (parsed && typeof parsed === 'object' && 'blueprint' in parsed) {
+        const res = parseAndValidateSceneManifest(parsed);
+        if (!res.ok) return res;
+        const m = res.manifest;
+        setCustomBlueprint(m.blueprint);
+        setCustomTitle(m.title);
+        setCustomNote(m.cinematographyNote);
+        setCustomDepthMapUrl(m.depthMapUrl ?? null);
+        if (m.cleanPlateUrl) setCustomCleanPlateUrl(m.cleanPlateUrl);
+        setState((prev) => ({
+          ...prev,
+          motionPreset: m.defaultMotion,
+          atmosphere: m.defaultAtmosphere,
+          convergence: m.defaultConvergence,
+          foregroundCut: m.defaultForegroundCut,
+          midgroundCut: m.defaultMidgroundCut,
+        }));
+        return { ok: true };
+      }
 
-      const nextBlueprint: SceneDepthBlueprint = {
-        horizonY:
-          typeof analysis.horizonY === 'number'
-            ? Math.min(0.85, Math.max(0.1, analysis.horizonY))
-            : 0.4,
-        groundSlope: 0.45,
-        edgeWeight: 0.16,
-        regions: Array.isArray(analysis.regions) ? analysis.regions : [],
-      };
-
-      const newDepth = generateInitialDepth(imageAssets, nextBlueprint);
-      depthBufferRef.current = newDepth;
-      setCustomBlueprint(nextBlueprint);
-      if (analysis.title) setCustomTitle(analysis.title);
-      if (analysis.cinematographyNote) setCustomNote(analysis.cinematographyNote);
-
-      setState((prev) => ({
-        ...prev,
-        motionPreset: validMotions.includes(analysis.recommendedMotion as CameraMotionPreset)
-          ? (analysis.recommendedMotion as CameraMotionPreset)
-          : prev.motionPreset,
-        atmosphere: validAtmos.includes(analysis.recommendedAtmosphere as AtmosphereMode)
-          ? (analysis.recommendedAtmosphere as AtmosphereMode)
-          : prev.atmosphere,
-        convergence:
-          typeof analysis.recommendedFocus === 'number'
-            ? Math.min(0.85, Math.max(0.2, analysis.recommendedFocus))
-            : prev.convergence,
-      }));
-      setDepthRevision((r) => r + 1);
-    } catch (err) {
-      setAiError(err instanceof Error ? err.message : 'Ошибка запроса к AI-серверу.');
-    } finally {
-      setAiAnalyzing(false);
-    }
-  }, [imageAssets]);
+      const bpRes = parseAndValidateBlueprint(parsed);
+      if (!bpRes.ok) return bpRes;
+      setCustomDepthMapUrl(null);
+      setCustomBlueprint(bpRes.blueprint);
+      return { ok: true };
+    },
+    [],
+  );
 
   const brushThrottleRef = useRef(0);
   const handleBrushPaint = useCallback(
@@ -308,6 +466,7 @@ export default function App() {
 
   const handleResetDepth = useCallback(() => {
     if (!imageAssets) return;
+    setCustomDepthMapUrl(null);
     depthBufferRef.current = generateInitialDepth(imageAssets, activeBlueprint);
     setState((prev) => ({ ...prev, depthContrast: 1.0 }));
     setDepthRevision((r) => r + 1);
@@ -387,7 +546,7 @@ export default function App() {
           <div className="pointer-events-none absolute top-4 left-4 z-10 rounded-lg border border-white/[0.08] bg-[#12161E]/95 px-3.5 py-2.5 text-xs">
             <p className="font-medium text-[#F5F7FA]">3D Разбор слоёв (LDI Stack)</p>
             <p className="mt-1 text-[#9AA4B4]">
-              Дальний план (Inpaint) · Средний план · Передний план
+              Дальний план ({ldiAssets?.usingCleanPlate ? 'Clean Plate' : 'Inpaint'}) · Средний план · Передний план
             </p>
           </div>
         )}
@@ -399,17 +558,37 @@ export default function App() {
           cinematographyNote={activeNote}
           ldiAssets={ldiAssets}
           collapsed={dockCollapsed}
-          aiAnalyzing={aiAnalyzing}
-          aiError={aiError}
+          hasExternalDepth={Boolean(effectiveDepthMapUrl)}
+          hasCleanPlate={Boolean(effectiveCleanPlateUrl)}
           onToggleCollapse={() => setDockCollapsed((c) => !c)}
           onUpdateState={updateState}
           onSelectScene={handleSelectScene}
           onUploadImage={handleUploadImage}
-          onAnalyzeWithAi={handleAnalyzeWithAi}
+          onUploadDepthMap={handleUploadDepthMap}
+          onUploadCleanPlate={handleUploadCleanPlate}
+          onClearCleanPlate={() => setCustomCleanPlateUrl(null)}
+          onOpenRecipe={() => setRecipeOpen(true)}
           onResetDepth={handleResetDepth}
           onRecomputeLdi={handleRecomputeLdi}
         />
       </main>
+
+      <RecipeModal
+        open={recipeOpen}
+        currentManifest={liveManifest}
+        hasExternalDepth={Boolean(effectiveDepthMapUrl)}
+        hasCleanPlate={Boolean(effectiveCleanPlateUrl)}
+        invertExternalDepth={invertExternalDepth}
+        snapExternalDepth={snapExternalDepth}
+        onClose={() => setRecipeOpen(false)}
+        onApplyJson={handleApplyRecipeJson}
+        onUploadDepthMap={handleUploadDepthMap}
+        onClearDepthMap={() => setCustomDepthMapUrl(null)}
+        onToggleInvertDepth={setInvertExternalDepth}
+        onToggleSnapDepth={setSnapExternalDepth}
+        onUploadCleanPlate={handleUploadCleanPlate}
+        onClearCleanPlate={() => setCustomCleanPlateUrl(null)}
+      />
 
       <TechniquesDrawer
         open={techniquesOpen}

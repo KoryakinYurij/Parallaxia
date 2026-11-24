@@ -208,20 +208,23 @@ export const ParallaxViewport = forwardRef<ParallaxViewportHandle, ParallaxViewp
 
       const planeGeo = new THREE.PlaneGeometry(1, 1, 1, 1);
 
-      // 1. POM Raymarching Single-Plane Mesh
+      // 1. Hybrid POM Raymarching + Disocclusion Inpaint Single-Plane Mesh
       const pomMaterial = new THREE.ShaderMaterial({
         uniforms: {
           uColorMap: { value: blankTex },
           uDepthMap: { value: blankTex },
+          uInpaintedBgMap: { value: blankTex },
           uParallaxOffset: { value: new THREE.Vector2(0, 0) },
           uDepthScale: { value: 0.55 },
           uConvergence: { value: 0.52 },
           uDofAmount: { value: 0.2 },
           uChromatic: { value: 0.15 },
           uVignette: { value: 0.35 },
+          uUseInpaintBlend: { value: 1 },
+          uForegroundCut: { value: 0.68 },
           uOverlayMode: { value: 0 },
           uSplitX: { value: 0.5 },
-          uSteps: { value: isSoftwareGl ? 8 : 16 },
+          uSteps: { value: isSoftwareGl ? 10 : 18 },
           uTexelSize: { value: new THREE.Vector2(1 / 1280, 1 / 720) },
         },
         vertexShader: POM_VERTEX_SHADER,
@@ -391,10 +394,11 @@ export const ParallaxViewport = forwardRef<ParallaxViewportHandle, ParallaxViewp
         const frustumW = frustumH * viewAspect;
 
         const dockOpen = !dockCollapsedRef.current;
-        const targetFrameY = dockOpen ? frustumH * 0.135 : 0;
+        const isLayersTab = s.activeTab === 'layers';
+        const targetFrameY = dockOpen ? frustumH * (isLayersTab ? 0.165 : 0.135) : 0;
         smoothFrameY += (targetFrameY - smoothFrameY) * damp;
 
-        const marginH = isExploded ? 0.56 : dockOpen ? 0.66 : 0.9;
+        const marginH = isExploded ? 0.54 : dockOpen ? (isLayersTab ? 0.60 : 0.66) : 0.9;
         const marginW = isExploded ? 0.72 : 0.92;
         let planeH = frustumH * marginH;
         let planeW = planeH * imgAspect;
@@ -410,19 +414,21 @@ export const ParallaxViewport = forwardRef<ParallaxViewportHandle, ParallaxViewp
         (stageGrid.material as THREE.LineBasicMaterial).opacity = smoothExplode * 0.24;
 
         if (usePom) {
-          camera.position.set(0, -smoothFrameY, baseDistance + smoothDollyZ * 0.55);
+          camera.position.set(0, -smoothFrameY, baseDistance + smoothDollyZ * 0.45);
           camera.fov = smoothFov;
           camera.lookAt(0, -smoothFrameY, 0);
           camera.updateProjectionMatrix();
 
           pomMesh.position.set(0, 0, 0);
           pomMesh.scale.set(planeW, planeH, 1);
-          pomMaterial.uniforms.uParallaxOffset.value.set(smoothOffX * 2.2, smoothOffY * 2.2);
+          pomMaterial.uniforms.uParallaxOffset.value.set(smoothOffX * 2.0, smoothOffY * 2.0);
           pomMaterial.uniforms.uDepthScale.value = s.parallaxStrength;
           pomMaterial.uniforms.uConvergence.value = s.convergence;
           pomMaterial.uniforms.uDofAmount.value = isDepthEdit ? 0 : s.dofAmount;
           pomMaterial.uniforms.uChromatic.value = isDepthEdit ? 0 : s.chromaticAmount;
           pomMaterial.uniforms.uVignette.value = isDepthEdit ? 0.1 : s.vignetteAmount;
+          pomMaterial.uniforms.uUseInpaintBlend.value = s.inpaintMode === 'none' ? 0 : 1;
+          pomMaterial.uniforms.uForegroundCut.value = s.foregroundCut;
           const overlayCode =
             s.depthOverlay === 'grayscale'
               ? 1
@@ -435,15 +441,16 @@ export const ParallaxViewport = forwardRef<ParallaxViewportHandle, ParallaxViewp
           pomMaterial.uniforms.uSplitX.value = 0.5 + ptr.x * 0.38;
         } else {
           // Real 3D camera orbiting & dollying across separated LDI depth planes
-          const camDist = baseDistance + smoothDollyZ + smoothExplode * 0.7;
-          const camX = smoothOffX * (1.25 + smoothExplode * 1.15);
-          const camY = -smoothFrameY + smoothOffY * (1.05 + smoothExplode * 0.4);
+          // Restrained baseline in normal LDI mode + generous exploration orbit in 3D Exploded mode
+          const camDist = baseDistance + smoothDollyZ * (0.55 + smoothExplode * 0.45) + smoothExplode * 0.7;
+          const camX = smoothOffX * (0.68 + smoothExplode * 1.65);
+          const camY = -smoothFrameY + smoothOffY * (0.48 + smoothExplode * 0.75);
           camera.position.set(camX, camY, camDist);
           camera.fov = smoothFov;
-          const sep = (0.34 + s.layerSeparation * 0.55) * (1 + smoothExplode * 1.25);
-          const zBg = -sep * 0.58;
+          const sep = (0.24 + s.layerSeparation * 0.38) * (1 + smoothExplode * 1.45);
+          const zBg = -sep * 0.55;
           const zMid = 0.0;
-          const zFg = sep * 0.58;
+          const zFg = sep * 0.55;
           const focusZ = THREE.MathUtils.lerp(zBg, zFg, s.convergence);
           camera.lookAt(0, -smoothFrameY, focusZ);
           camera.rotation.z += targetRig.roll;
@@ -451,7 +458,7 @@ export const ParallaxViewport = forwardRef<ParallaxViewportHandle, ParallaxViewp
 
           const scaleForZ = (z: number) => {
             const distFromCam = Math.max(0.5, baseDistance - z);
-            const overscan = isExploded ? 1.0 : 1.06;
+            const overscan = isExploded ? 1.0 : 1.14;
             return (distFromCam / baseDistance) * overscan;
           };
 
@@ -480,6 +487,29 @@ export const ParallaxViewport = forwardRef<ParallaxViewportHandle, ParallaxViewp
           updateLdiUniforms(bgMat, rawHoleChecker);
           updateLdiUniforms(midMat, 0);
           updateLdiUniforms(fgMat, 0);
+        }
+
+        // Fixed Cinema Matte Scissor Crop in normal playback (eliminates floating skewed card borders!)
+        const canvasW = Math.max(1, container.clientWidth);
+        const canvasH = Math.max(1, container.clientHeight);
+        if (!isExploded && smoothExplode < 0.05) {
+          const matteW = Math.round((planeW / frustumW) * canvasW);
+          const matteH = Math.round((planeH / frustumH) * canvasH);
+          const matteX = Math.round((canvasW - matteW) * 0.5);
+          // WebGL scissor origin is bottom-left; shifting frame upward by smoothFrameY moves bottom edge UP
+          const centerYFromBottom = canvasH * 0.5 + (smoothFrameY / frustumH) * canvasH;
+          const matteY = Math.round(centerYFromBottom - matteH * 0.5);
+          renderer.setScissorTest(false);
+          renderer.clear();
+          renderer.setScissorTest(true);
+          renderer.setScissor(
+            Math.max(0, matteX),
+            Math.max(0, matteY),
+            Math.max(1, Math.min(canvasW, matteW)),
+            Math.max(1, Math.min(canvasH, matteH)),
+          );
+        } else {
+          renderer.setScissorTest(false);
         }
 
         // Atmospheric particles clipped cleanly within the image plane bounds
@@ -637,6 +667,7 @@ export const ParallaxViewport = forwardRef<ParallaxViewportHandle, ParallaxViewp
 
       eng.pomMaterial.uniforms.uColorMap.value = colorTex;
       eng.pomMaterial.uniforms.uDepthMap.value = depthTex;
+      eng.pomMaterial.uniforms.uInpaintedBgMap.value = bgTex;
       eng.pomMaterial.uniforms.uTexelSize.value.set(texelX, texelY);
 
       eng.bgMat.uniforms.uLayerMap.value = bgTex;

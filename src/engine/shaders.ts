@@ -11,12 +11,15 @@ export const POM_FRAGMENT_SHADER = /* glsl */ `
 
   uniform sampler2D uColorMap;
   uniform sampler2D uDepthMap;
+  uniform sampler2D uInpaintedBgMap;
   uniform vec2 uParallaxOffset;
   uniform float uDepthScale;
   uniform float uConvergence;
   uniform float uDofAmount;
   uniform float uChromatic;
   uniform float uVignette;
+  uniform float uUseInpaintBlend;
+  uniform float uForegroundCut;
   uniform float uOverlayMode; // 0=final, 1=grayscale, 2=heatmap, 3=split
   uniform float uSplitX;
   uniform float uSteps;
@@ -40,9 +43,9 @@ export const POM_FRAGMENT_SHADER = /* glsl */ `
     return clamp(uv, vec2(0.002), vec2(0.998));
   }
 
-  // Parallax Occlusion Mapping (Raymarching + Binary Refinement)
-  vec3 raymarchPom(vec2 uv, vec2 shift) {
-    float steps = max(4.0, uSteps);
+  // Hybrid Parallax Occlusion Mapping (Raymarching + Binary Refinement + Disocclusion Stretch Detection)
+  vec4 raymarchPom(vec2 uv, vec2 shift) {
+    float steps = max(6.0, uSteps);
     vec2 baseUv = uv + shift * (1.0 - uConvergence);
     vec2 stepUv = -shift / steps;
 
@@ -50,19 +53,21 @@ export const POM_FRAGMENT_SHADER = /* glsl */ `
     float currRayDepth = 1.0;
     float stepDepth = 1.0 / steps;
     float sampledDepth = texture2D(uDepthMap, clampSafeUv(currUv)).r;
+    float prevSampled = sampledDepth;
 
-    for (int i = 0; i < 16; i++) {
+    for (int i = 0; i < 18; i++) {
       if (float(i) >= steps) break;
       if (sampledDepth >= currRayDepth) break;
+      prevSampled = sampledDepth;
       currUv += stepUv;
       currRayDepth -= stepDepth;
       sampledDepth = texture2D(uDepthMap, clampSafeUv(currUv)).r;
     }
 
-    // Binary refinement along the last segment for crisp foreground edges
+    // Binary refinement along the last segment for razor-sharp foreground silhouettes
     vec2 prevUv = currUv - stepUv;
     float prevRay = currRayDepth + stepDepth;
-    for (int b = 0; b < 4; b++) {
+    for (int b = 0; b < 5; b++) {
       vec2 midUv = 0.5 * (currUv + prevUv);
       float midRay = 0.5 * (currRayDepth + prevRay);
       float midSample = texture2D(uDepthMap, clampSafeUv(midUv)).r;
@@ -75,40 +80,47 @@ export const POM_FRAGMENT_SHADER = /* glsl */ `
       }
     }
 
-    float hitDepth = texture2D(uDepthMap, clampSafeUv(currUv)).r;
-    return vec3(clampSafeUv(currUv), hitDepth);
+    vec2 safeHit = clampSafeUv(currUv);
+    float hitDepth = texture2D(uDepthMap, safeHit).r;
+    // Detect disocclusion strictly when a ray passes a foreground-cut silhouette into far background
+    // (only foreground-cut zones were erased & inpainted in uInpaintedBgMap — never smear midground edges!)
+    float depthDrop = max(0.0, prevSampled - hitDepth);
+    float passedForeground = smoothstep(uForegroundCut - 0.08, uForegroundCut + 0.04, prevSampled);
+    float landedBackground = 1.0 - smoothstep(uForegroundCut - 0.22, uForegroundCut - 0.06, hitDepth);
+    float disocclusion = smoothstep(0.16, 0.38, depthDrop) * passedForeground * landedBackground;
+    return vec4(safeHit, hitDepth, disocclusion);
   }
 
-  vec3 sampleOptics(vec2 uv, float depthVal) {
+  vec3 sampleOptics(sampler2D tex, vec2 uv, float depthVal) {
     float coc = abs(depthVal - uConvergence) * uDofAmount;
-    vec2 chromaVec = (uv - 0.5) * (uChromatic * 0.008 * (0.4 + coc * 1.4));
+    vec2 chromaVec = (uv - 0.5) * (uChromatic * 0.007 * (0.35 + coc * 1.3));
 
     if (coc < 0.025) {
-      float r = texture2D(uColorMap, clampSafeUv(uv + chromaVec)).r;
-      float g = texture2D(uColorMap, uv).g;
-      float b = texture2D(uColorMap, clampSafeUv(uv - chromaVec)).b;
+      float r = texture2D(tex, clampSafeUv(uv + chromaVec)).r;
+      float g = texture2D(tex, uv).g;
+      float b = texture2D(tex, clampSafeUv(uv - chromaVec)).b;
       return vec3(r, g, b);
     }
 
     // 8-tap Poisson disk bokeh blur weighted by Circle of Confusion
-    float radius = coc * 5.5;
+    float radius = coc * 5.0;
     vec2 px = uTexelSize * radius;
     vec3 acc = vec3(0.0);
-    acc += texture2D(uColorMap, clampSafeUv(uv + chromaVec)).rgb * 0.20;
-    acc += texture2D(uColorMap, clampSafeUv(uv + vec2( 0.86,  0.50) * px)).rgb * 0.10;
-    acc += texture2D(uColorMap, clampSafeUv(uv + vec2(-0.86,  0.50) * px)).rgb * 0.10;
-    acc += texture2D(uColorMap, clampSafeUv(uv + vec2( 0.86, -0.50) * px)).rgb * 0.10;
-    acc += texture2D(uColorMap, clampSafeUv(uv + vec2(-0.86, -0.50) * px)).rgb * 0.10;
-    acc += texture2D(uColorMap, clampSafeUv(uv + vec2( 0.00,  1.00) * px)).rgb * 0.10;
-    acc += texture2D(uColorMap, clampSafeUv(uv + vec2( 0.00, -1.00) * px)).rgb * 0.10;
-    acc += texture2D(uColorMap, clampSafeUv(uv + vec2( 1.00,  0.00) * px - chromaVec)).rgb * 0.10;
-    acc += texture2D(uColorMap, clampSafeUv(uv + vec2(-1.00,  0.00) * px - chromaVec)).rgb * 0.10;
+    acc += texture2D(tex, clampSafeUv(uv + chromaVec)).rgb * 0.20;
+    acc += texture2D(tex, clampSafeUv(uv + vec2( 0.86,  0.50) * px)).rgb * 0.10;
+    acc += texture2D(tex, clampSafeUv(uv + vec2(-0.86,  0.50) * px)).rgb * 0.10;
+    acc += texture2D(tex, clampSafeUv(uv + vec2( 0.86, -0.50) * px)).rgb * 0.10;
+    acc += texture2D(tex, clampSafeUv(uv + vec2(-0.86, -0.50) * px)).rgb * 0.10;
+    acc += texture2D(tex, clampSafeUv(uv + vec2( 0.00,  1.00) * px)).rgb * 0.10;
+    acc += texture2D(tex, clampSafeUv(uv + vec2( 0.00, -1.00) * px)).rgb * 0.10;
+    acc += texture2D(tex, clampSafeUv(uv + vec2( 1.00,  0.00) * px - chromaVec)).rgb * 0.10;
+    acc += texture2D(tex, clampSafeUv(uv + vec2(-1.00,  0.00) * px - chromaVec)).rgb * 0.10;
     return acc;
   }
 
   void main() {
-    // Subtle overscan crop to keep displaced borders completely free of edge clamping
-    float overscan = 1.0 + abs(uDepthScale) * 0.14;
+    // Clean overscan crop guarantees edges stay completely inside the frame with zero border smudging
+    float overscan = 1.0 + abs(uDepthScale) * 0.10;
     vec2 scaledUv = (vUv - 0.5) / overscan + 0.5;
 
     float rawDepth = texture2D(uDepthMap, clampSafeUv(scaledUv)).r;
@@ -123,17 +135,23 @@ export const POM_FRAGMENT_SHADER = /* glsl */ `
       return;
     }
 
-    vec2 shift = uParallaxOffset * (uDepthScale * 0.14);
-    vec3 hit = raymarchPom(scaledUv, shift);
-    vec3 finalCol = sampleOptics(hit.xy, hit.z);
+    // Physically restrained cinema parallax scale for authentic spatial illusion
+    vec2 shift = uParallaxOffset * (uDepthScale * 0.095);
+    vec4 hit = raymarchPom(scaledUv, shift);
+    vec3 finalCol = sampleOptics(uColorMap, hit.xy, hit.z);
+
+    // Seamless disocclusion inpaint fill strictly at foreground-to-background tear edges
+    if (uUseInpaintBlend > 0.5 && hit.w > 0.01) {
+      vec3 inpaintedCol = sampleOptics(uInpaintedBgMap, hit.xy, hit.z);
+      finalCol = mix(finalCol, inpaintedCol, hit.w * 0.85);
+    }
 
     // Subtle cinema vignette
     float dist = length((vUv - 0.5) * vec2(1.15, 1.0));
-    float vig = 1.0 - smoothstep(0.42, 0.98, dist) * (uVignette * 0.55);
+    float vig = 1.0 - smoothstep(0.42, 0.98, dist) * (uVignette * 0.52);
     finalCol *= vig;
 
     if (uOverlayMode >= 2.5) {
-      // Split comparison: Left = heatmap depth map, Right = live 2.5D POM result
       if (vUv.x < uSplitX) {
         finalCol = mix(texture2D(uColorMap, clampSafeUv(scaledUv)).rgb, depthToHeatmap(rawDepth), 0.72);
       }
